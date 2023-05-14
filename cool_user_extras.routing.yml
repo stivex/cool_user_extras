@@ -1,0 +1,7 @@
+cool_user_extras.settings:
+    path: '/admin/config/people/cool_user_extras'
+    defaults:
+        _form: '\Drupal\cool_user_extras\Form\CoolUserExtrasSettingsForm'
+        _title: 'Cool User Extras Settings'
+    requirements:
+        _permission: 'cool form access'

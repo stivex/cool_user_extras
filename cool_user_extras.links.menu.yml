@@ -1,0 +1,5 @@
+cool_user_extras.settings:
+    title: Cool User Extras Settings
+    route_name: cool_user_extras.settings
+    parent: user.admin_index
+    description: 'Settings about users.'

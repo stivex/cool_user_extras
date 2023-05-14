@@ -1,0 +1,219 @@
+<?php
+
+/**
+ * It generates a random password
+ */
+function generatePassword() {
+
+	$bytes = random_bytes(5);
+	$result = bin2hex($bytes);
+	
+	return $result;
+
+}
+
+/**
+ * It checks if the user has a specific role
+ */
+function hasRole($role_name) {
+	
+	$user_roles = \Drupal::currentUser()->getRoles();
+	
+	if (in_array($role_name, $user_roles)) {
+		return true;
+	} else {
+		return false;
+	}
+	
+}
+
+/**
+* Implements hook_cron().
+* This hook will be executed each time that Drupal executes the cron.
+* It will import the users from an external database of Drupal.
+*/
+function cool_user_extras_cron() {
+	
+	//We get the configuration that it was set from administration section
+	//We can't do service injection here because we are into a PHP file with static methods
+	$config = \Drupal::config('cool_user_extras.settings');
+	
+	//We get the language
+	$language = \Drupal::languageManager()->getCurrentLanguage()->getId();
+	
+	//We get the parameter that it will be used to know if we are allowed to execute the importation of users 
+	$cron = (is_null($config->get('cron'))) ? '' : base64_decode($config->get('cron'));
+	
+	//If the configuration are active, we are going to execute the users importation
+	if ($cron) {
+		
+		\Drupal::logger('cool_user_extras')->notice(t('Users import has started.'));
+		
+		//We get the remote database connection params
+		$db_host = (is_null($config->get('host'))) ? '' : base64_decode($config->get('host'));
+		$db_port = (is_null($config->get('port'))) ? '' : base64_decode($config->get('port'));
+		$db_database = (is_null($config->get('database'))) ? '' : base64_decode($config->get('database'));
+		$db_user = (is_null($config->get('user'))) ? '' : base64_decode($config->get('user'));
+		$db_pass = (is_null($config->get('pass'))) ? '' : base64_decode($config->get('pass'));
+		
+		//We get the params to generate the query
+		$db_query = (is_null($config->get('query'))) ? '' : base64_decode($config->get('query'));
+		$db_column_username = (is_null($config->get('column_username'))) ? '' : base64_decode($config->get('column_username'));
+		$db_column_mail = (is_null($config->get('column_mail'))) ? '' : base64_decode($config->get('column_mail'));
+		
+		//We get the roles that will be assigned on the new imported users
+		$roles = $config->get('roles');
+		
+		$roles_active = array();
+		
+		foreach ($roles as $key => $value) {
+			
+			//Only we will include active roles (which have been selected from the configuration page of this module)
+			if ($value != 0) {
+				array_push($roles_active, $key);
+			}
+			
+		}
+		
+		//We set that mysqli could throw exceptions
+		mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+		
+		try {
+			
+			//We create a database connection (according the previous connection params)
+			$con = mysqli_connect($db_host, $db_user, $db_pass, $db_database, $db_port);
+			
+			//We execute the query against database
+			$result = mysqli_query($con, $db_query);
+			
+		} catch (mysqli_sql_exception $e) {
+			\Drupal::logger('cool_user_extras')->error(t('Failed to connect to the database: %error'), ['%error' => $e->getMessage()]);
+			return;
+		}
+		
+		//We retrieve the users from the result to execute the previous query
+		while($row = mysqli_fetch_assoc($result)) {
+			
+			$external_users[] = $row;
+			
+			$query = \Drupal::entityQuery('user');
+			$query->accessCheck(FALSE);
+			$query->condition('name', $row[$db_column_username]);
+			$query->execute();
+			$count = $query->count()->execute();
+			
+			if ($count == 0) {
+				//The user has not been found in the local database, we are going to create it
+				
+				$user = \Drupal\user\Entity\User::create();
+				
+				//Mandatory properties 
+				$user->setPassword(generatePassword());
+				$user->enforceIsNew();
+				$user->setEmail($row[$db_column_mail]);
+				$user->setUsername($row[$db_column_username]);
+				
+				//Optional properties
+				$user->set('init', 'email');
+				$user->set('langcode', $language);
+				$user->set('preferred_langcode', $language);
+				$user->set('preferred_admin_langcode', $language);
+				
+				//We assign the roles
+				foreach ($roles_active as $rid) {
+					$user->addRole($rid);
+				}
+				
+				//We enable the user account
+				$user->activate();
+				
+				//We save the user
+				$user->save();
+				
+				\Drupal::logger('cool_user_extras')->notice(t('User %user has been imported'), ['%user' => $row[$db_column_username]]);
+				
+			}
+			
+		}
+		
+		//We close the database connection
+		mysqli_close($con);
+		
+		\Drupal::logger('cool_user_extras')->notice(t('Users import has finished.'));
+		
+	} else {
+		//Cron user importation disabled
+		\Drupal::logger('cool_user_extras')->notice(t('User import is disabled.'));
+	}
+	
+}
+
+/**
+* Implements hook_form_alter.
+* This hook fires when a form loads, in order to modify its behavior, values, etc.
+*/
+function cool_user_extras_form_alter(&$form, \Drupal\Core\Form\FormStateInterface $form_state, $form_id) {
+	
+	//We verify that we are into a section that contains a form
+	if ($form_state->getFormObject() instanceof \Drupal\Core\Entity\EntityFormInterface) {
+		
+		//We get the entity
+		$entity = $form_state->getFormObject()->getEntity();
+		
+		//We get the name of the entity
+		$entity_name = $entity->bundle();
+		
+		//We get the configuration that has established from administration section
+		//We can't do service injection here because we are into a PHP file with static methods
+		$config = \Drupal::config('cool_user_extras.settings');
+		
+		//We get the user behavior configuration
+		$load_default_user = (is_null($config->get('load_default_user'))) ? [] : $config->get('load_default_user');
+		
+		//We check if this form is one that we are interested to alter its behavior
+		if (array_key_exists($entity_name, $load_default_user)) {
+			
+			//We load the default value + we disable the field (readonly), only in case that the following conditions become true
+			//1-Into the module configuration has enabled this behavior for this type of entity
+			//2-The user has not the admin role
+			//3-The user has not the role that excludes
+			if ($load_default_user[$entity_name] != 0 && !hasRole('administrator') && !hasRole(base64_decode($config->get('role_excluded')))) {
+				
+				$entityFieldManager = \Drupal::service('entity_field.manager');
+				
+				//We get the entity fields definitions/configurations
+				$fields_definition = $entityFieldManager->getFieldDefinitions('node', $entity_name);
+				
+				//We iterate each field
+				foreach ($fields_definition as $field_id => $field_config) {
+					
+					//Only fields that are entity reference
+					if ($field_config instanceof \Drupal\field\Entity\FieldConfig && $field_config->getType() == 'entity_reference') {
+						
+						//Only when the field is an user entity reference
+						if ($field_config->getSettings()['target_type'] == 'user') {
+							
+							//1-We set a default user value
+							//If we are not in edit/delete form (only in add form) we set the default value
+							$form_operation = $form_state->getFormObject()->getOperation();
+							if ($form_operation != 'edit' && $form_operation != 'delete') {
+								$form[$field_id]['widget']['#default_value'] = \Drupal::currentUser()->id();
+							}
+							
+							//2-We disable the field (read-only)
+							$form[$field_id]['#disabled'] = TRUE;
+							
+						}
+						
+					}
+					
+				}
+				
+			}
+			
+		}
+		
+	}
+	
+	
+}
